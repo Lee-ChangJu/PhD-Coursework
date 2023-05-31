@@ -1,0 +1,118 @@
+---
+title: "Final Assignment"
+author: CJ
+format: html
+---
+
+```{r}
+#| message: false
+#| include: false
+library(dplyr, warn.conflicts = FALSE)
+library(dbplyr)
+library(DBI)
+library(lubridate)
+library(stargazer)
+library(ggplot2)
+library(tidyr)
+library(farr)
+library(writexl)
+```
+
+## Connecting Database
+```{r}
+Sys.setenv(PGHOST = "wrds-pgdata.wharton.upenn.edu",
+           PGPORT = 9737L,
+           PGDATABASE = "wrds",
+           PGUSER = "changjuu", 
+           PGPASSWORD = "1143619sssS!")
+
+pg <- dbConnect(RPostgres::Postgres(),
+                bigint = "integer",
+                check_interrupts = TRUE)
+```
+
+
+## Filer Status (Audit Analytics)
+```{r}
+auditnonreli <- tbl(pg, sql("SELECT * FROM audit.accfiler"))
+
+FilerStatus <-
+  auditnonreli %>% 
+  select(company_fkey, pe_date, hst_is_accel_filer, hst_is_large_accel, hst_is_small_report) %>% 
+  rename(cik = company_fkey) %>%
+  mutate(cikkey = paste(cik, pe_date, sep="_")) %>%
+  select(!cik) %>%
+  collect()
+```
+
+
+## Variables (Funda)
+```{r}
+funda <- tbl(pg, sql("SELECT * FROM comp.funda"))
+
+variables <-
+  funda %>%
+  filter(indfmt == "INDL", datafmt == "STD",
+         consol == "C", popsrc == "D", fyear >= "1996") %>% 
+  # remove utilities and financial institutions
+  filter(!(sich >= "4900" & sich <= "4999")) %>% 
+  filter(!(sich >= "6000" & sich <= "6999")) %>%
+  filter(!is.na(sich)) %>%
+  filter(!is.na(cik)) %>%
+  select(gvkey, cik, cusip, conm, tic, sich, fyear, datadate, csho, sstk, prstkc, pstkl, prcc_f, ajex, at, ceq, csho, dltt, dlc, ib, xint, txt, ppent, xrd, sale) %>%
+  collect()
+
+variables <-
+  variables %>%
+  mutate(cikkey = paste(cik, datadate, sep="_"))
+
+```
+
+
+## Firms (Firm’s first appearance in Compustat.)
+```{r}
+firstr <-
+  funda %>%
+  filter(indfmt == "INDL", datafmt == "STD",
+         consol == "C", popsrc == "D", fyear >= "1996") %>% 
+  filter(!(sich >= "4900" & sich <= "4999")) %>% 
+  filter(!(sich >= "6000" & sich <= "6999")) %>%
+  filter(!is.na(sich)) %>%
+  filter(!is.na(cik)) %>%
+  select(gvkey, datadate) %>%
+  group_by(gvkey) %>% 
+  arrange(datadate) %>%
+  mutate(order=row_number()) %>%
+  filter(order=="1") %>%
+  select(gvkey, datadate) %>%
+  rename(firstr = datadate) %>%
+  collect()
+```
+
+
+## Mearge to Main Table
+```{r}
+Main <- 
+  variables %>%
+  left_join(FilerStatus, by = "cikkey") %>%
+  left_join(firstr, by = "gvkey")
+```
+
+
+## Make variables
+```{r}
+MainT <- 
+  Main %>%
+  group_by(gvkey) %>%
+  arrange(datadate) %>%
+  #COMSTK_ISSUE
+  mutate(COMSTK = (sstk - prstkc - (pstkl-lag(pstkl)))/lag(at)) %>% 
+  mutate(COMSTK_ISSUE = ifelse(COMSTK >= 0.05, "1", "0")) %>% 
+  #Post SOX
+  mutate(POST = ifelse(datadate >="2003-07-01", "1", ifelse(datadate <="2001-12-31","0","Non"))) %>%
+  #Non-accelerated filers
+  mutate(NAF = ifelse(datadate >="2003-07-01" & hst_is_accel_filer =="1", "1",
+               ifelse(datadate >="2003-07-01" & hst_is_small_report =="1", "1",
+               ifelse(datadate <="2001-12-31" & csho <=75, "1","0")))) %>%
+  
+  select(gvkey, conm, fyear, datadate, COMSTK, COMSTK_ISSUE, POST, hst_is_accel_filer, hst_is_small_report, csho, NAF)    
